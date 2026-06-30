@@ -14,15 +14,8 @@ const products = [
     price: 80,
     images: ["/Arivuamudhu_book.png"],
     description: "Tamil rhymes book designed for preschool kids.",
-  },
-  {
-    id: 3,
-    title: "Paachcharam",
-    category: "Kids Stories",
-    price: 120,
-    images: ["/Paachcharam_book.png"],
-    description: "Beautiful Tamil story book for kids with colorful illustrations.",
   }
+    
 ];
 
 module.exports = products;
