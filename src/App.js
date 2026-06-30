@@ -21,13 +21,32 @@ const app = express();
 
 app.set("trust proxy", 1);
 
-const allowedOrigins = process.env.CLIENT_URL
-  ? process.env.CLIENT_URL.split(",").map((origin) => origin.trim())
-  : true;
+// const allowedOrigins = process.env.CLIENT_URL
+//   ? process.env.CLIENT_URL.split(",").map((origin) => origin.trim())
+//   : true;
+
+// app.use(
+//   cors({
+//     origin: allowedOrigins,
+//     credentials: true,
+//   })
+// );
+
+const allowedOrigins = [
+  "https://kuviyam-ecommerce.vercel.app",
+  "http://localhost:5173", // Local development
+];
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      // Allow requests without origin (Postman, mobile apps, browser direct access)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
