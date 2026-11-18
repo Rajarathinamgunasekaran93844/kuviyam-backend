@@ -17,10 +17,13 @@ const generateSlug = (title) => {
     .replace(/^-|-$/g, "");
 };
 
-const cleanText = (value) => {
+const cleanText = (value, maxLength, fieldName = "Field") => {
   if (typeof value !== "string") return null;
 
   const trimmed = value.trim();
+  if (trimmed.length > maxLength) {
+    throw new ApiError(400, `${fieldName} must not exceed ${maxLength} characters.`);
+  }
   return trimmed || null;
 };
 
@@ -65,8 +68,8 @@ const dbFindBySlug = (db) => (slug) =>
 const memoryFindBySlug = async (slug) => findMemoryBlogBySlug(slug);
 
 const buildCreateData = async (req, findBySlug) => {
-  const title = cleanText(req.body.title);
-  const content = cleanText(req.body.content);
+  const title = cleanText(req.body.title, 160, "Title");
+  const content = cleanText(req.body.content, 100_000, "Content");
 
   if (!title || !content) {
     throw new ApiError(400, "Title and content are required.");
@@ -75,10 +78,10 @@ const buildCreateData = async (req, findBySlug) => {
   return {
     title,
     slug: await ensureUniqueSlug(title, null, findBySlug),
-    excerpt: cleanText(req.body.excerpt),
+    excerpt: cleanText(req.body.excerpt, 500, "Excerpt"),
     content,
-    imageUrl: cleanText(req.body.imageUrl),
-    author: cleanText(req.body.author) || req.user?.name || "Kuviyam Publications",
+    imageUrl: cleanText(req.body.imageUrl, 2_000, "Image URL"),
+    author: cleanText(req.body.author, 120, "Author") || req.user?.name || "Kuviyam Publications",
     isPublished: normalizeBoolean(req.body.isPublished),
   };
 };
@@ -185,7 +188,7 @@ const buildBlogUpdateData = async (body, currentBlog, findBySlug) => {
   const data = {};
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {
-    const title = cleanText(body.title);
+    const title = cleanText(body.title, 160, "Title");
 
     if (!title) {
       throw new ApiError(400, "Title is required.");
@@ -196,7 +199,7 @@ const buildBlogUpdateData = async (body, currentBlog, findBySlug) => {
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "content")) {
-    const content = cleanText(body.content);
+    const content = cleanText(body.content, 100_000, "Content");
 
     if (!content) {
       throw new ApiError(400, "Content is required.");
@@ -205,9 +208,10 @@ const buildBlogUpdateData = async (body, currentBlog, findBySlug) => {
     data.content = content;
   }
 
+  const blogTextLimits = { excerpt: 500, imageUrl: 2_000, author: 120 };
   ["excerpt", "imageUrl", "author"].forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(body, field)) {
-      data[field] = cleanText(body[field]);
+      data[field] = cleanText(body[field], blogTextLimits[field], field);
     }
   });
 

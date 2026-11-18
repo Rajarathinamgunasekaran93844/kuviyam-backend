@@ -6,8 +6,10 @@
   "type": "commonjs",
   "scripts": {
     "dev": "nodemon src/Server.js",
+    "dev:memory": "node scripts/dev-memory.js",
     "start": "node src/Server.js",
     "check": "node --check src/Server.js",
+    "test": "node --test",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",

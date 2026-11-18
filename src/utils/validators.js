@@ -3,7 +3,7 @@ const ApiError = require("./ApiError");
 const requireFields = (body, fields) => {
   const missingFields = fields.filter((field) => {
     const value = body?.[field];
-    return value === undefined || value === null || String(value).trim() === "";
+    return typeof value !== "string" || value.trim() === "";
   });
 
   if (missingFields.length > 0) {
@@ -16,8 +16,9 @@ const requireFields = (body, fields) => {
 
 const requireEmail = (email) => {
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const normalizedEmail = String(email || "").trim();
 
-  if (!emailPattern.test(String(email || "").trim())) {
+  if (normalizedEmail.length > 254 || !emailPattern.test(normalizedEmail)) {
     throw new ApiError(400, "Please provide a valid email address.");
   }
 };
@@ -36,9 +37,10 @@ const requirePhone = (phone) => {
 };
 
 const toPositiveInt = (value, fieldName) => {
-  const parsed = Number.parseInt(value, 10);
+  const stringValue = String(value ?? "").trim();
+  const parsed = /^\d+$/.test(stringValue) ? Number(stringValue) : NaN;
 
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new ApiError(400, `${fieldName} must be a positive number.`);
   }
 

@@ -36,6 +36,8 @@ model Product {
   carts       Cart[]
   orderItems  OrderItem[]
   wishlistedBy Wishlist[]
+
+  @@index([category])
 }
 
 model Cart {
@@ -59,6 +61,8 @@ model Order {
   total           Float
   status          String   @default("PLACED")
   paymentMethod   String   @default("COD")
+  razorpayOrderId String?  @unique
+  razorpayPaymentId String? @unique
   customerName    String
   customerPhone   String
   customerAddress String
@@ -70,6 +74,8 @@ model Order {
 
   user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   items OrderItem[]
+
+  @@index([userId, createdAt])
 }
 
 model OrderItem {
@@ -107,6 +113,8 @@ model ContactMessage {
   email     String
   message   String
   createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 model GalleryMedia {
@@ -137,4 +145,6 @@ model Blog {
   isPublished Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  @@index([isPublished, createdAt])
 }

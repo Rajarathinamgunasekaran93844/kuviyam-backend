@@ -9,6 +9,9 @@ const {
 } = require("../services/store");
 
 const placeOrder = asyncHandler(async (req, res) => {
+  if (req.body.paymentMethod && req.body.paymentMethod !== "COD") {
+    throw new ApiError(400, "Online payments must use the payment checkout flow.");
+  }
   const customer = req.body.customer || {};
   requireFields(customer, ["name", "phone", "address"]);
 

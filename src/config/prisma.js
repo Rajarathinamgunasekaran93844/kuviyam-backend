@@ -1,34 +1,25 @@
 let prisma = null;
 let disabled = false;
+const memoryMode =
+  process.env.NODE_ENV !== "production" && process.env.DATABASE_MODE === "memory";
 
-const {
-  createPrismaAdapter,
-  redactConnectionString,
-} = require("./prismaAdapter");
+const { createPrismaAdapter } = require("./prismaAdapter");
+const ApiError = require("../utils/ApiError");
 
-console.log("=== Prisma Config Debug ===");
-console.log("DATABASE_URL loaded:", !!process.env.DATABASE_URL);
-if (process.env.DATABASE_URL) {
-  console.log("DATABASE_URL target:", redactConnectionString(process.env.DATABASE_URL));
-}
-
-try {
-  const { PrismaClient } = require("@prisma/client");
-
-  if (!process.env.DATABASE_URL) {
-    throw new Error("DATABASE_URL is not configured");
-  }
-
-  const adapter = createPrismaAdapter(process.env.DATABASE_URL);
-
-  prisma = new PrismaClient({ adapter });
-  console.log("PrismaClient initialized successfully.");
-} catch (error) {
+if (memoryMode) {
   disabled = true;
-  console.error("Prisma initialization error:", error);
-  console.warn(
-    `Prisma database mode is disabled (${error.message}). API will use in-memory data.`
-  );
+  console.warn("Explicit in-memory development mode is enabled.");
+} else if (process.env.DATABASE_URL) {
+  try {
+    const { PrismaClient } = require("@prisma/client");
+    const adapter = createPrismaAdapter(process.env.DATABASE_URL);
+    prisma = new PrismaClient({ adapter });
+  } catch {
+    disabled = true;
+    console.error("Prisma could not be initialized. Database requests will be unavailable.");
+  }
+} else {
+  disabled = true;
 }
 
 const isExpectedApiError = (error) =>
@@ -36,7 +27,8 @@ const isExpectedApiError = (error) =>
 
 const withPrisma = async (operation, fallback) => {
   if (!prisma || disabled) {
-    return fallback();
+    if (memoryMode) return fallback();
+    throw new ApiError(503, "Database service is unavailable.");
   }
 
   try {
@@ -46,12 +38,22 @@ const withPrisma = async (operation, fallback) => {
       throw error;
     }
 
-    disabled = true;
-    console.warn(
-      `Prisma is unavailable for this process (${error.message}). Falling back to in-memory data.`
-    );
+    console.error("Database operation failed.", {
+      code: error.code || "UNKNOWN",
+    });
+    throw new ApiError(503, "Database service is temporarily unavailable.");
+  }
+};
 
-    return fallback(error);
+const checkDatabase = async () => {
+  if (memoryMode) return true;
+  if (!prisma || disabled) return false;
+
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -64,4 +66,6 @@ const disconnectPrisma = async () => {
 module.exports = {
   withPrisma,
   disconnectPrisma,
+  checkDatabase,
+  isMemoryMode: () => memoryMode,
 };

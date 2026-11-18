@@ -1,27 +1,66 @@
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
+const Razorpay = require("razorpay");
+const crypto = require("crypto");
+const ApiError = require("./ApiError");
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_yourkey',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'yoursecret'
-});
-
-// Create Razorpay Order
-const createRazorpayOrder = async (amount, currency = 'INR') => {
-  const options = {
-    amount: Math.round(amount * 100), // Amount in paisa
-    currency,
-    receipt: `receipt_order_${Date.now()}`
-  };
-  return await razorpay.orders.create(options);
+const getCredentials = () => {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) {
+    throw new ApiError(503, "Online payments are not configured.");
+  }
+  return { keyId, keySecret };
 };
 
-// Verify Payment Verification
-const verifyPayment = async (razorpay_order_id, razorpay_payment_id, razorpay_signature) => {
-  const hmac = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || 'yoursecret');
-  hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
-  const generated_signature = hmac.digest('hex');
-  return generated_signature === razorpay_signature;
+const getRazorpayClient = () => {
+  const { keyId, keySecret } = getCredentials();
+  return new Razorpay({ key_id: keyId, key_secret: keySecret });
 };
 
-module.exports = { createRazorpayOrder, verifyPayment };
+const getRazorpayKeyId = () => getCredentials().keyId;
+
+const createRazorpayOrder = async (amount, receipt) => {
+  const amountInPaise = Math.round(Number(amount) * 100);
+  if (!Number.isSafeInteger(amountInPaise) || amountInPaise < 100) {
+    throw new ApiError(400, "The order amount is invalid.");
+  }
+
+  return getRazorpayClient().orders.create({
+    amount: amountInPaise,
+    currency: "INR",
+    receipt: String(receipt).slice(0, 40),
+  });
+};
+
+const verifyPayment = (orderId, paymentId, signature) => {
+  if (
+    typeof orderId !== "string" ||
+    typeof paymentId !== "string" ||
+    typeof signature !== "string" ||
+    !/^[a-f0-9]{64}$/i.test(signature)
+  ) {
+    return false;
+  }
+
+  const { keySecret } = getCredentials();
+  const expected = crypto
+    .createHmac("sha256", keySecret)
+    .update(`${orderId}|${paymentId}`)
+    .digest();
+  const received = Buffer.from(signature, "hex");
+
+  return received.length === expected.length && crypto.timingSafeEqual(expected, received);
+};
+
+const fetchPayment = async (paymentId) => {
+  if (typeof paymentId !== "string" || paymentId.length > 100) {
+    throw new ApiError(400, "The payment identifier is invalid.");
+  }
+  return getRazorpayClient().payments.fetch(paymentId);
+};
+
+module.exports = {
+  createRazorpayOrder,
+  fetchPayment,
+  getRazorpayKeyId,
+  verifyPayment,
+};

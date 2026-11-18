@@ -1,14 +1,17 @@
 const ApiError = require("../utils/ApiError");
 
 const notFound = (req, res, next) => {
-  next(new ApiError(404, `Route not found: ${req.originalUrl}`));
+  next(new ApiError(404, "Route not found."));
 };
 
 const errorHandler = (error, req, res, next) => {
   const statusCode = error.statusCode || error.status || 500;
 
   if (statusCode >= 500) {
-    console.error(error);
+    console.error("Request failed.", {
+      code: error.code || "UNKNOWN",
+      name: error.name || "Error",
+    });
   }
 
   res.status(statusCode).json({
@@ -16,8 +19,10 @@ const errorHandler = (error, req, res, next) => {
     message:
       statusCode === 413
         ? "The uploaded file is too large."
-        : error.message || "Something went wrong.",
-    ...(error.details ? { details: error.details } : {}),
+        : statusCode >= 500 && statusCode !== 503
+          ? "Service temporarily unavailable."
+          : error.message || "Something went wrong.",
+    ...(statusCode < 500 && error.details ? { details: error.details } : {}),
   });
 };
 

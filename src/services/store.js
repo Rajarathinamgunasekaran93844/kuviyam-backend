@@ -3,9 +3,10 @@ const bcrypt = require("bcryptjs");
 const seedProducts = require("../data/products");
 const { withPrisma } = require("../config/prisma");
 const ApiError = require("../utils/ApiError");
-const { requireFields } = require("../utils/validators");
+const { requireFields, requirePhone } = require("../utils/validators");
 
 const now = () => new Date().toISOString();
+let seedProductsPromise = null;
 
 const memory = {
   users: [],
@@ -65,12 +66,16 @@ const comparePassword = async (plainPassword, storedPassword) => {
     return false;
   }
 
-  const bcryptMatch = await bcrypt
-    .compare(plainPassword, storedPassword)
-    .catch(() => false);
+  if (!/^\$2[aby]\$\d{2}\$/.test(storedPassword)) {
+    // Legacy plaintext credentials are upgraded after a successful login.
+    return plainPassword === storedPassword;
+  }
 
-  return bcryptMatch || plainPassword === storedPassword;
+  return bcrypt.compare(plainPassword, storedPassword).catch(() => false);
 };
+
+const passwordNeedsUpgrade = (storedPassword) =>
+  !/^\$2[aby]\$\d{2}\$/.test(storedPassword) || bcrypt.getRounds(storedPassword) < 12;
 
 const productWriteData = (product) => ({
   title: product.title,
@@ -81,33 +86,27 @@ const productWriteData = (product) => ({
 });
 
 const ensureSeedProducts = async (db) => {
-  for (const product of seedProducts) {
-    await db.product.upsert({
-      where: {
-        id: product.id,
-      },
-      update: productWriteData(product),
-      create: {
-        id: product.id,
-        ...productWriteData(product),
-      },
+  if (!seedProductsPromise) {
+    seedProductsPromise = (async () => {
+      await db.product.createMany({
+        data: seedProducts.map((product) => ({
+          id: product.id,
+          ...productWriteData(product),
+        })),
+        skipDuplicates: true,
+      });
+
+      const maxIdResult = await db.product.aggregate({ _max: { id: true } });
+      const maxId = maxIdResult._max.id || seedProducts.length;
+      memory.nextProductId = maxId + 1;
+      await db.$queryRaw`SELECT setval(pg_get_serial_sequence('"Product"', 'id'), COALESCE((SELECT MAX(id) FROM "Product"), 1), true)`;
+    })().catch((error) => {
+      seedProductsPromise = null;
+      throw error;
     });
   }
 
-  // Get the highest product ID from database and update memory.nextProductId
-  const maxIdResult = await db.product.aggregate({
-    _max: {
-      id: true,
-    },
-  });
-  const maxId = maxIdResult._max.id || seedProducts.length;
-  // Reset the auto-increment sequence for PostgreSQL to avoid unique constraint errors
-  try {
-    await db.$executeRawUnsafe(`ALTER SEQUENCE "Product_id_seq" RESTART WITH ${maxId + 1};`);
-  } catch (e) {
-    console.warn("Could not reset product sequence:", e.message);
-  }
-  memory.nextProductId = maxId + 1;
+  return seedProductsPromise;
 };
 
 const getMemoryProduct = (id) =>
@@ -165,26 +164,29 @@ const formatCart = (rows) => {
 };
 
 const buildOrderItem = (incomingItem, product) => {
-  const source = normalizeProduct(product || incomingItem);
-  const quantity = Math.max(1, Number.parseInt(incomingItem.quantity, 10) || 1);
-  const price = Number(source?.price ?? incomingItem.price ?? 0);
+  const source = normalizeProduct(product);
+  const quantity = Number(incomingItem.quantity);
+  const price = Number(source.price);
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new ApiError(400, "One of the selected books has an invalid price.");
+  }
   const productImage = source?.images?.[0] || null;
   const lineTotal = price * quantity;
 
   return {
-    productId: product?.id || null,
-    productTitle: source?.title || incomingItem.title || "Book",
-    productCategory: source?.category || incomingItem.category || null,
+    productId: product.id,
+    productTitle: source.title,
+    productCategory: source.category,
     productImage,
     quantity,
     price,
     lineTotal,
     responseItem: {
-      id: product?.id || incomingItem.id || incomingItem.productId,
-      title: source?.title || incomingItem.title || "Book",
-      category: source?.category || incomingItem.category || null,
+      id: product.id,
+      title: source.title,
+      category: source.category,
       price,
-      images: source?.images || [],
+      images: source.images,
       quantity,
     },
   };
@@ -297,7 +299,7 @@ const getProductById = async (id) => {
 
 const registerUser = async ({ name, email, phone, address, password }) => {
   const normalizedEmail = normalizeEmail(email);
-  const passwordHash = await bcrypt.hash(password, 10);
+  const passwordHash = await bcrypt.hash(password, 12);
 
   return withPrisma(
     async (db) => {
@@ -366,6 +368,13 @@ const loginUser = async ({ email, password }) => {
         throw new ApiError(401, "Invalid email or password.");
       }
 
+      if (passwordNeedsUpgrade(user.password)) {
+        await db.user.update({
+          where: { id: user.id },
+          data: { password: await bcrypt.hash(password, 12) },
+        });
+      }
+
       return publicUser(user);
     },
     async () => {
@@ -373,6 +382,10 @@ const loginUser = async ({ email, password }) => {
 
       if (!user || !(await comparePassword(password, user.password))) {
         throw new ApiError(401, "Invalid email or password.");
+      }
+
+      if (passwordNeedsUpgrade(user.password)) {
+        user.password = await bcrypt.hash(password, 12);
       }
 
       return publicUser(user);
@@ -428,7 +441,7 @@ const updateUser = async (userId, payload) => {
   }
 
   if (payload.password) {
-    updateData.password = await bcrypt.hash(payload.password, 10);
+    updateData.password = await bcrypt.hash(payload.password, 12);
   }
 
   return withPrisma(
@@ -486,12 +499,15 @@ const getCart = async (userId) =>
     async () => getMemoryCart(userId)
   );
 
-const addToCart = async (userId, payload) => {
-  const productId = Number(payload.productId || payload.product?.id || payload.id);
-  const quantity = Math.max(1, Number.parseInt(payload.quantity, 10) || 1);
+const addToCart = async (userId, payload = {}) => {
+  const productId = Number(payload.productId ?? payload.product?.id ?? payload.id);
+  const quantity = Number(payload.quantity ?? 1);
 
-  if (!productId) {
+  if (!Number.isSafeInteger(productId) || productId < 1) {
     throw new ApiError(400, "Product id is required.");
+  }
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 50) {
+    throw new ApiError(400, "Cart item quantity must be between 1 and 50.");
   }
 
   return withPrisma(
@@ -508,24 +524,28 @@ const addToCart = async (userId, payload) => {
         throw new ApiError(404, "Product not found.");
       }
 
-      await db.cart.upsert({
-        where: {
-          userId_productId: {
-            userId: Number(userId),
-            productId,
-          },
-        },
-        update: {
-          quantity: {
-            increment: quantity,
-          },
-        },
-        create: {
-          userId: Number(userId),
-          productId,
-          quantity,
-        },
-      });
+      const cartWhere = {
+        userId: Number(userId),
+        productId,
+      };
+      const boundedIncrement = () =>
+        db.cart.updateMany({
+          where: { ...cartWhere, quantity: { lte: 50 - quantity } },
+          data: { quantity: { increment: quantity } },
+        });
+
+      const updated = await boundedIncrement();
+      if (updated.count === 0) {
+        try {
+          await db.cart.create({ data: { ...cartWhere, quantity } });
+        } catch (error) {
+          if (error.code !== "P2002") throw error;
+          const retried = await boundedIncrement();
+          if (retried.count !== 1) {
+            throw new ApiError(400, "Cart item quantity cannot exceed 50.");
+          }
+        }
+      }
 
       return getDbCart(db, Number(userId));
     },
@@ -541,6 +561,9 @@ const addToCart = async (userId, payload) => {
       );
 
       if (existingItem) {
+        if (existingItem.quantity + quantity > 50) {
+          throw new ApiError(400, "Cart item quantity cannot exceed 50.");
+        }
         existingItem.quantity += quantity;
       } else {
         memory.carts.push({
@@ -559,8 +582,15 @@ const addToCart = async (userId, payload) => {
 };
 
 const updateCartItem = async (userId, productId, quantity) => {
-  const nextQuantity = Math.max(1, Number.parseInt(quantity, 10) || 1);
+  const nextQuantity = Number(quantity);
   const parsedProductId = Number(productId);
+
+  if (!Number.isSafeInteger(parsedProductId) || parsedProductId < 1) {
+    throw new ApiError(400, "Product id must be a positive integer.");
+  }
+  if (!Number.isSafeInteger(nextQuantity) || nextQuantity < 1 || nextQuantity > 50) {
+    throw new ApiError(400, "Cart item quantity must be between 1 and 50.");
+  }
 
   return withPrisma(
     async (db) => {
@@ -648,85 +678,128 @@ const clearCart = async (userId) =>
     }
   );
 
-const createOrder = async (userId, payload) => {
+const createOrder = async (
+  userId,
+  payload,
+  { paymentMethod = "COD", status = "PLACED", clearCartAfterCreate = true } = {}
+) => {
   const customer = payload.customer || {};
   const incomingItems = Array.isArray(payload.items) ? payload.items : [];
 
-  if (incomingItems.length === 0) {
-    throw new ApiError(400, "Order must contain at least one item.");
+  if (incomingItems.length === 0 || incomingItems.length > 50) {
+    throw new ApiError(400, "Order must contain between 1 and 50 items.");
+  }
+
+  const customerData = {
+    name: String(customer.name || "").trim(),
+    phone: requirePhone(customer.phone),
+    address: String(customer.address || "").trim(),
+  };
+
+  if (!customerData.name || !customerData.phone || !customerData.address) {
+    throw new ApiError(400, "Complete the delivery details before placing an order.");
+  }
+  if (customerData.name.length > 120 || customerData.address.length > 500) {
+    throw new ApiError(400, "Delivery details exceed the allowed length.");
+  }
+
+  const getValidatedOrderItems = async (findProduct) => {
+    const items = [];
+
+    for (const item of incomingItems) {
+      const productId = Number(item.productId || item.id);
+      const quantity = Number(item.quantity);
+      if (!Number.isSafeInteger(productId) || productId < 1) {
+        throw new ApiError(400, "Order contains an invalid product.");
+      }
+      if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 50) {
+        throw new ApiError(400, "Each item quantity must be between 1 and 50.");
+      }
+
+      const product = await findProduct(productId);
+      if (!product) {
+        throw new ApiError(404, "One of the selected books is no longer available.");
+      }
+      items.push(buildOrderItem({ ...item, quantity }, product));
+    }
+
+    return items;
+  };
+
+  const orderData = (orderItems) => ({
+    userId: Number(userId),
+    total: orderItems.reduce((sum, item) => sum + item.lineTotal, 0),
+    status,
+    paymentMethod,
+    customerName: customerData.name,
+    customerPhone: customerData.phone,
+    customerAddress: customerData.address,
+    items: orderItems.map((item) => ({
+      quantity: item.quantity,
+      price: item.price,
+      lineTotal: item.lineTotal,
+      productTitle: item.productTitle,
+      productCategory: item.productCategory,
+      productImage: item.productImage,
+      productId: item.productId,
+    })),
+  });
+
+  const totalIsValid = (items) => {
+    const total = items.reduce((sum, item) => sum + item.lineTotal, 0);
+    if (!Number.isFinite(total) || total <= 0) {
+      throw new ApiError(400, "Order total must be greater than zero.");
+    }
   }
 
   return withPrisma(
     async (db) => {
       await ensureSeedProducts(db);
+      const orderItems = await getValidatedOrderItems((id) =>
+        db.product.findUnique({ where: { id } })
+      );
+      totalIsValid(orderItems);
 
-      const orderItems = [];
-
-      for (const item of incomingItems) {
-        const productId = Number(item.productId || item.id);
-        const product = productId
-          ? await db.product.findUnique({
-              where: {
-                id: productId,
-              },
-            })
-          : null;
-
-        orderItems.push(buildOrderItem(item, product));
-      }
-
-      const total = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
-
-      const order = await db.order.create({
-        data: {
-          userId: Number(userId),
-          total,
-          status: "PLACED",
-          paymentMethod: payload.paymentMethod || "COD",
-          customerName: customer.name.trim(),
-          customerPhone: customer.phone.trim(),
-          customerAddress: customer.address.trim(),
-          items: {
-            create: orderItems.map((item) => ({
-              quantity: item.quantity,
-              price: item.price,
-              lineTotal: item.lineTotal,
-              productTitle: item.productTitle,
-              productCategory: item.productCategory,
-              productImage: item.productImage,
-              productId: item.productId,
-            })),
+      const order = await db.$transaction(async (tx) => {
+        const created = await tx.order.create({
+          data: {
+            ...orderData(orderItems),
+            items: { create: orderData(orderItems).items },
           },
-        },
-        include: {
-          items: true,
-        },
-      });
+          include: { items: true },
+        });
 
-      await db.cart.deleteMany({
-        where: {
-          userId: Number(userId),
-        },
+        if (clearCartAfterCreate) {
+          await tx.cart.deleteMany({ where: { userId: Number(userId) } });
+        }
+        return created;
       });
-
       return formatOrder(order);
     },
     async () => {
       const orderItems = incomingItems.map((item) => {
         const product = getMemoryProduct(item.productId || item.id);
-        return buildOrderItem(item, product);
+        if (!product) {
+          throw new ApiError(404, "One of the selected books is no longer available.");
+        }
+        const quantity = Number(item.quantity);
+        if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 50) {
+          throw new ApiError(400, "Each item quantity must be between 1 and 50.");
+        }
+        return buildOrderItem({ ...item, quantity }, product);
       });
-
-      const total = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
+      totalIsValid(orderItems);
 
       const order = {
         id: memory.nextOrderId,
-        customerName: customer.name.trim(),
-        customerPhone: customer.phone.trim(),
-        customerAddress: customer.address.trim(),
-        total,
-        status: "PLACED",
-        paymentMethod: payload.paymentMethod || "COD",
+        customerName: customerData.name,
+        customerPhone: customerData.phone,
+        customerAddress: customerData.address,
+        total: orderItems.reduce((sum, item) => sum + item.lineTotal, 0),
+        status,
+        paymentMethod,
+        razorpayOrderId: null,
+        razorpayPaymentId: null,
         userId: Number(userId),
         createdAt: now(),
         updatedAt: now(),
@@ -744,12 +817,145 @@ const createOrder = async (userId, payload) => {
 
       memory.nextOrderId += 1;
       memory.orders.push(order);
-      memory.carts = memory.carts.filter((item) => item.userId !== Number(userId));
+      if (clearCartAfterCreate) {
+        memory.carts = memory.carts.filter((item) => item.userId !== Number(userId));
+      }
 
       return formatOrder(order);
     }
   );
 };
+
+const createPendingPaymentOrder = (userId, payload) =>
+  createOrder(userId, payload, {
+    paymentMethod: "RAZORPAY",
+    status: "PENDING_PAYMENT",
+    clearCartAfterCreate: false,
+  });
+
+const setRazorpayOrderId = async (userId, orderId, razorpayOrderId) =>
+  withPrisma(
+    async (db) => {
+      const result = await db.order.updateMany({
+        where: {
+          id: Number(orderId),
+          userId: Number(userId),
+          status: "PENDING_PAYMENT",
+          razorpayOrderId: null,
+        },
+        data: { razorpayOrderId },
+      });
+      if (result.count !== 1) {
+        throw new ApiError(409, "Payment order could not be linked.");
+      }
+    },
+    async () => {
+      const order = memory.orders.find(
+        (entry) => entry.id === Number(orderId) && entry.userId === Number(userId)
+      );
+      if (!order || order.status !== "PENDING_PAYMENT" || order.razorpayOrderId) {
+        throw new ApiError(409, "Payment order could not be linked.");
+      }
+      order.razorpayOrderId = razorpayOrderId;
+    }
+  );
+
+const markPaymentSetupFailed = async (userId, orderId) =>
+  withPrisma(
+    async (db) =>
+      db.order.updateMany({
+        where: {
+          id: Number(orderId),
+          userId: Number(userId),
+          status: "PENDING_PAYMENT",
+          razorpayOrderId: null,
+        },
+        data: { status: "PAYMENT_SETUP_FAILED" },
+      }),
+    async () => {
+      const order = memory.orders.find(
+        (entry) => entry.id === Number(orderId) && entry.userId === Number(userId)
+      );
+      if (order && order.status === "PENDING_PAYMENT" && !order.razorpayOrderId) {
+        order.status = "PAYMENT_SETUP_FAILED";
+      }
+    }
+  );
+
+const getPaymentOrder = async (userId, razorpayOrderId) =>
+  withPrisma(
+    async (db) => {
+      const order = await db.order.findFirst({
+        where: { userId: Number(userId), razorpayOrderId },
+        include: { items: true },
+      });
+      return order ? formatOrder(order) : null;
+    },
+    async () => {
+      const order = memory.orders.find(
+        (entry) =>
+          entry.userId === Number(userId) && entry.razorpayOrderId === razorpayOrderId
+      );
+      return order ? formatOrder(order) : null;
+    }
+  );
+
+const completePaymentOrder = async (userId, razorpayOrderId, razorpayPaymentId) =>
+  withPrisma(
+    async (db) =>
+      db.$transaction(async (tx) => {
+        const existing = await tx.order.findFirst({
+          where: { userId: Number(userId), razorpayOrderId },
+          include: { items: true },
+        });
+        if (!existing) return null;
+        if (
+          existing.status === "PAID" &&
+          existing.razorpayPaymentId === razorpayPaymentId
+        ) {
+          return formatOrder(existing);
+        }
+
+        const result = await tx.order.updateMany({
+          where: {
+            id: existing.id,
+            userId: Number(userId),
+            status: "PENDING_PAYMENT",
+            razorpayPaymentId: null,
+          },
+          data: { status: "PAID", razorpayPaymentId },
+        });
+        if (result.count !== 1) {
+          throw new ApiError(409, "This payment order has already been completed.");
+        }
+
+        await tx.cart.deleteMany({ where: { userId: Number(userId) } });
+        const paidOrder = await tx.order.findUnique({
+          where: { id: existing.id },
+          include: { items: true },
+        });
+        return formatOrder(paidOrder);
+      }),
+    async () => {
+      const order = memory.orders.find(
+        (entry) =>
+          entry.userId === Number(userId) && entry.razorpayOrderId === razorpayOrderId
+      );
+      if (!order) return null;
+      if (order.status === "PAID" && order.razorpayPaymentId === razorpayPaymentId) {
+        return formatOrder(order);
+      }
+      if (order.status !== "PENDING_PAYMENT" || order.razorpayPaymentId) {
+        throw new ApiError(409, "This payment order has already been completed.");
+      }
+
+      order.status = "PAID";
+      order.razorpayPaymentId = razorpayPaymentId;
+      order.updatedAt = now();
+      memory.carts = memory.carts.filter((item) => item.userId !== Number(userId));
+      return formatOrder(order);
+    }
+  );
 
 const getOrders = async (userId) =>
   withPrisma(
@@ -1204,21 +1410,65 @@ const deleteGalleryMedia = async (id) =>
     }
   );
 
-const createProduct = async (productData) => {
-  const createProductInternal = (data) => {
-    // Validate data
-    requireFields(data, ['title', 'category', 'price']);
+const normalizeProductData = (data, { partial = false } = {}) => {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new ApiError(400, "Product data must be an object.");
+  }
 
-    return {
-      title: data.title.trim(),
-      category: data.category.trim(),
-      price: Number(data.price),
-      images: data.images || [],
-      description: data.description || '',
-    };
+  const normalized = {};
+  const setText = (field, maxLength, required = false) => {
+    if (!partial || Object.hasOwn(data, field)) {
+      const value = String(data[field] ?? "").trim();
+      if (required && !value) throw new ApiError(400, `${field} is required.`);
+      if (value.length > maxLength) {
+        throw new ApiError(400, `${field} must not exceed ${maxLength} characters.`);
+      }
+      normalized[field] = value;
+    }
   };
 
-  const validatedData = createProductInternal(productData);
+  setText("title", 160, !partial);
+  setText("category", 80, !partial);
+  setText("description", 10_000);
+
+  if (!partial || Object.hasOwn(data, "price")) {
+    const price = Number(data.price);
+    if (!Number.isFinite(price) || price <= 0 || price > 1_000_000) {
+      throw new ApiError(400, "Price must be greater than 0 and no more than 1,000,000.");
+    }
+    normalized.price = price;
+  }
+
+  if (!partial || Object.hasOwn(data, "images")) {
+    const images = data.images ?? [];
+    if (!Array.isArray(images) || images.length > 10) {
+      throw new ApiError(400, "Images must be an array of at most 10 URLs.");
+    }
+    normalized.images = images.map((image) => {
+      if (typeof image !== "string") {
+        throw new ApiError(400, "Each product image must be a URL.");
+      }
+      const value = image.trim();
+      if (
+        !value || value.length > 2_000 ||
+        !(value.startsWith("/") && !value.startsWith("//")) &&
+          !/^https:\/\//i.test(value)
+      ) {
+        throw new ApiError(400, "Each product image must be a local path or HTTPS URL.");
+      }
+      return value;
+    });
+  }
+
+  if (partial && Object.keys(normalized).length === 0) {
+    throw new ApiError(400, "No valid product fields were provided.");
+  }
+
+  return normalized;
+};
+
+const createProduct = async (productData) => {
+  const validatedData = normalizeProductData(productData);
 
   return withPrisma(
     async (db) => {
@@ -1242,7 +1492,7 @@ const createProduct = async (productData) => {
           });
           const maxId = maxIdResult._max.id || 0;
           try {
-            await db.$executeRawUnsafe(`ALTER SEQUENCE "Product_id_seq" RESTART WITH ${maxId + 1};`);
+            await db.$queryRaw`SELECT setval(pg_get_serial_sequence('"Product"', 'id'), COALESCE((SELECT MAX(id) FROM "Product"), 1), true)`;
           } catch (seqErr) {
             console.warn("Could not reset product sequence:", seqErr.message);
           }
@@ -1276,6 +1526,10 @@ const createProduct = async (productData) => {
 
 const updateProduct = async (id, data) => {
   const productId = Number(id);
+  if (!Number.isSafeInteger(productId) || productId < 1) {
+    throw new ApiError(400, "Product id must be a positive integer.");
+  }
+  const updateData = normalizeProductData(data, { partial: true });
   
   return withPrisma(
     async (db) => {
@@ -1285,24 +1539,6 @@ const updateProduct = async (id, data) => {
 
       if (!existingProduct) {
         return null;
-      }
-
-      const updateData = {};
-      
-      if (data.title !== undefined) {
-        updateData.title = data.title;
-      }
-      if (data.category !== undefined) {
-        updateData.category = data.category;
-      }
-      if (data.price !== undefined) {
-        updateData.price = Number(data.price);
-      }
-      if (data.description !== undefined) {
-        updateData.description = data.description;
-      }
-      if (data.images !== undefined) {
-        updateData.images = data.images;
       }
 
       const updatedProduct = await db.product.update({
@@ -1321,21 +1557,7 @@ const updateProduct = async (id, data) => {
 
       const product = memory.products[productIndex];
       
-      if (data.title !== undefined) {
-        product.title = data.title;
-      }
-      if (data.category !== undefined) {
-        product.category = data.category;
-      }
-      if (data.price !== undefined) {
-        product.price = Number(data.price);
-      }
-      if (data.description !== undefined) {
-        product.description = data.description;
-      }
-      if (data.images !== undefined) {
-        product.images = data.images;
-      }
+      Object.assign(product, updateData);
       
       product.updatedAt = now();
       return normalizeProduct(product);
@@ -1395,6 +1617,11 @@ module.exports = {
   clearCart,
   createContactMessage,
   createOrder,
+  createPendingPaymentOrder,
+  setRazorpayOrderId,
+  markPaymentSetupFailed,
+  getPaymentOrder,
+  completePaymentOrder,
   getCart,
   getLatestOrder,
   getOrderById,

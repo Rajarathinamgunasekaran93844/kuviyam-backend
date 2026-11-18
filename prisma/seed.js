@@ -9,6 +9,10 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not configured");
 }
 
+if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12) {
+  throw new Error("Set ADMIN_PASSWORD to a value with at least 12 characters before seeding.");
+}
+
 const prisma = new PrismaClient({
   adapter: createPrismaAdapter(process.env.DATABASE_URL),
 });
@@ -19,13 +23,7 @@ const main = async () => {
   for (const product of products) {
     await prisma.product.upsert({
       where: { id: product.id },
-      update: {
-        title: product.title,
-        category: product.category,
-        price: product.price,
-        images: product.images,
-        description: product.description,
-      },
+      update: {},
       create: {
         id: product.id,
         title: product.title,
@@ -38,11 +36,13 @@ const main = async () => {
     console.log(`Seeded product: ${product.title}`);
   }
 
+  await prisma.$queryRaw`SELECT setval(pg_get_serial_sequence('"Product"', 'id'), COALESCE((SELECT MAX(id) FROM "Product"), 1), true)`;
+
   console.log("\nSeeding admin user...");
 
   const adminEmail = process.env.ADMIN_EMAIL || "admin@paachcharam.com";
-  const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
-  const hashedPassword = await bcrypt.hash(adminPassword, 10);
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  const hashedPassword = await bcrypt.hash(adminPassword, 12);
 
   await prisma.user.upsert({
     where: { email: adminEmail },
@@ -58,9 +58,6 @@ const main = async () => {
   });
 
   console.log("Admin user seeded.");
-  if (!process.env.ADMIN_PASSWORD) {
-    console.log("ADMIN_PASSWORD is not set; the default seed password was used.");
-  }
 
   console.log("\nAll seeding completed successfully.");
 };
