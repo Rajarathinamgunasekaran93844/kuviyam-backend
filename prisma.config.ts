@@ -15,8 +15,8 @@ export default defineConfig({
   },
 
   datasource: {
-    url: env(
-      "DATABASE_URL"
-    ),
+    // Use Neon’s direct connection for Prisma CLI migrations. Runtime API
+    // connections continue to use the pooled DATABASE_URL.
+    url: process.env.DIRECT_DATABASE_URL || env("DATABASE_URL"),
   },
 });

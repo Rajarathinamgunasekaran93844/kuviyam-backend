@@ -1263,7 +1263,13 @@ const withoutGalleryData = (media) => {
     return null;
   }
 
-  const { data, ...metadata } = media;
+  const {
+    data,
+    storageKey,
+    providerUploadId,
+    providerAssetId,
+    ...metadata
+  } = media;
   return metadata;
 };
 
@@ -1279,6 +1285,10 @@ const getGalleryMedia = async () =>
           mimeType: true,
           originalName: true,
           size: true,
+          storageProvider: true,
+          externalUrl: true,
+          playbackId: true,
+          assetStatus: true,
           createdAt: true,
           uploadedBy: {
             select: {
@@ -1309,6 +1319,8 @@ const getGalleryMediaFile = async (id) =>
           mimeType: true,
           originalName: true,
           size: true,
+          externalUrl: true,
+          storageProvider: true,
         },
       }),
     async () => {
@@ -1323,9 +1335,61 @@ const getGalleryMediaFile = async (id) =>
         mimeType: media.mimeType,
         originalName: media.originalName,
         size: media.size,
+        externalUrl: media.externalUrl,
+        storageProvider: media.storageProvider || "DATABASE",
       };
     }
   );
+
+const getGalleryMediaById = async (id) =>
+  withPrisma(
+    async (db) =>
+      db.galleryMedia.findUnique({
+        where: { id: Number(id) },
+        select: {
+          id: true,
+          title: true,
+          category: true,
+          mediaType: true,
+          mimeType: true,
+          originalName: true,
+          size: true,
+          storageProvider: true,
+          storageKey: true,
+          externalUrl: true,
+          providerUploadId: true,
+          providerAssetId: true,
+          playbackId: true,
+          assetStatus: true,
+          createdAt: true,
+        },
+      }),
+    async () => {
+      const media = memory.galleryMedia.find((item) => item.id === Number(id));
+      return media ? { ...media } : null;
+    }
+  );
+
+const getGalleryMediaByMuxId = async ({ uploadId, assetId }) => {
+  const where = uploadId
+    ? { storageProvider: "MUX", providerUploadId: uploadId }
+    : { storageProvider: "MUX", providerAssetId: assetId };
+
+  return withPrisma(
+    async (db) =>
+      db.galleryMedia.findFirst({
+        where,
+        select: { id: true, storageProvider: true },
+      }),
+    async () => {
+      const media = memory.galleryMedia.find(
+        (item) => item.storageProvider === "MUX" &&
+          (uploadId ? item.providerUploadId === uploadId : item.providerAssetId === assetId)
+      );
+      return media ? { id: media.id, storageProvider: media.storageProvider } : null;
+    }
+  );
+};
 
 const createGalleryMedia = async (userId, payload) =>
   withPrisma(
@@ -1339,6 +1403,13 @@ const createGalleryMedia = async (userId, payload) =>
           originalName: payload.originalName,
           size: payload.size,
           data: payload.data,
+          storageProvider: payload.storageProvider || "DATABASE",
+          storageKey: payload.storageKey,
+          externalUrl: payload.externalUrl,
+          providerUploadId: payload.providerUploadId,
+          providerAssetId: payload.providerAssetId,
+          playbackId: payload.playbackId,
+          assetStatus: payload.assetStatus,
           uploadedById: Number(userId),
         },
         include: {
@@ -1371,6 +1442,23 @@ const createGalleryMedia = async (userId, payload) =>
     }
   );
 
+const updateGalleryMedia = async (id, payload) =>
+  withPrisma(
+    async (db) => {
+      const media = await db.galleryMedia.update({
+        where: { id: Number(id) },
+        data: payload,
+      });
+      return withoutGalleryData(media);
+    },
+    async () => {
+      const media = memory.galleryMedia.find((item) => item.id === Number(id));
+      if (!media) return null;
+      Object.assign(media, payload);
+      return withoutGalleryData(media);
+    }
+  );
+
 const deleteGalleryMedia = async (id) =>
   withPrisma(
     async (db) => {
@@ -1381,6 +1469,11 @@ const deleteGalleryMedia = async (id) =>
         select: {
           id: true,
           title: true,
+          mediaType: true,
+          storageProvider: true,
+          storageKey: true,
+          providerUploadId: true,
+          providerAssetId: true,
         },
       });
 
@@ -1647,7 +1740,10 @@ module.exports = {
   getAdminStats,
   getGalleryMedia,
   getGalleryMediaFile,
+  getGalleryMediaById,
+  getGalleryMediaByMuxId,
   createGalleryMedia,
+  updateGalleryMedia,
   deleteGalleryMedia,
   // Product management
   createProduct,

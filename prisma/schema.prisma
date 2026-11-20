@@ -118,15 +118,22 @@ model ContactMessage {
 }
 
 model GalleryMedia {
-  id           Int      @id @default(autoincrement())
-  title        String
-  category     String   @default("Memories")
-  mediaType    String
-  mimeType     String
-  originalName String
-  size         Int
-  data         Bytes
-  createdAt    DateTime @default(now())
+  id               Int      @id @default(autoincrement())
+  title            String
+  category         String   @default("Memories")
+  mediaType        String
+  mimeType         String
+  originalName     String
+  size             Int
+  data             Bytes?
+  storageProvider  String   @default("DATABASE")
+  storageKey       String?
+  externalUrl      String?
+  providerUploadId String?  @unique
+  providerAssetId  String?  @unique
+  playbackId       String?
+  assetStatus      String?
+  createdAt        DateTime @default(now())
 
   uploadedById Int
   uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)

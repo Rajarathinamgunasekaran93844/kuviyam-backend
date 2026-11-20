@@ -4,6 +4,8 @@ const authenticate = require("../middleware/auth");
 const adminAuth = require("../middleware/adminAuth");
 const {
   listMedia,
+  createVideoUpload,
+  getMediaStatus,
   removeMedia,
   streamMedia,
   uploadMedia,
@@ -12,6 +14,8 @@ const {
 const router = express.Router();
 
 router.get("/", listMedia);
+router.post("/video-upload", authenticate, adminAuth, createVideoUpload);
+router.get("/:id/status", authenticate, adminAuth, getMediaStatus);
 router.get("/:id/file", streamMedia);
 
 router.post(

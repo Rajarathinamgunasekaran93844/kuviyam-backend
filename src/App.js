@@ -13,6 +13,7 @@ const paymentRoutes = require("./routes/paymentRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const galleryRoutes = require("./routes/galleryRoutes");
 const blogRoutes = require("./routes/blogRoutes");
+const { handleMuxWebhook } = require("./controllers/galleryController");
 const {
   errorHandler,
   notFound,
@@ -52,6 +53,13 @@ app.use(
       }
     },
   })
+);
+
+// Mux signature verification requires the untouched request body.
+app.post(
+  "/api/webhooks/mux",
+  express.raw({ type: "application/json", limit: "1mb" }),
+  handleMuxWebhook
 );
 
 app.use(express.json({ limit: "1mb" }));

@@ -4,10 +4,10 @@ Express 5 API with Prisma and PostgreSQL. The frontend is in `../../Publication_
 
 ## Local setup
 
-1. Copy `.env.example` to `.env` and fill in the database URL and a random `JWT_SECRET` of at least 32 characters.
+1. Copy `.env.example` to `.env` and fill in the database URL and a random `JWT_SECRET` of at least 32 characters. For Neon, use the pooled URL as `DATABASE_URL` and the direct URL as `DIRECT_DATABASE_URL`.
 2. Install dependencies with `npm ci`.
 3. Generate the Prisma client with `npm run prisma:generate`.
-4. Apply checked-in migrations to a development database with `npx prisma migrate deploy`.
+4. Apply checked-in migrations to a development database with `npx prisma migrate deploy`. Prisma uses `DIRECT_DATABASE_URL` for CLI migrations when it is set.
 5. Set a unique `ADMIN_PASSWORD` (12 or more characters) and run `npm run seed` when creating the initial catalog/admin account.
 6. Start with `npm run dev`.
 
@@ -26,7 +26,8 @@ Online checkout requires valid Razorpay key ID/secret values. The backend calcul
 - `/api/health` checks database readiness and returns 503 when it is unavailable.
 - Rate limits currently use a per-process memory store. Use a shared store or gateway-level limits before running multiple API instances.
 - Password reset requires SMTP settings. OTPs are kept in process memory for ten minutes, so use a shared store before horizontal scaling.
-- Gallery media is stored in PostgreSQL. For larger libraries, move files to private object storage and keep metadata in the database.
+- Gallery image uploads use Cloudinary when `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` are set. Existing database-stored media remains readable; new images fall back to database storage only when Cloudinary is not configured outside production.
+- New gallery video uploads use authenticated Mux direct uploads when Mux credentials are configured. Set `MUX_TOKEN_ID`, `MUX_TOKEN_SECRET`, and `MUX_WEBHOOK_SECRET`; configure a Mux webhook for `/api/webhooks/mux` with `video.upload.asset_created`, `video.asset.ready`, and `video.asset.errored` events. Videos upload from the browser directly to Mux, while PostgreSQL stores media metadata and playback IDs.
 - Configure database backups, retention, restore drills, TLS, log retention, and error monitoring with the hosting provider. This repository cannot verify those account-level settings.
 - Set `CLIENT_URL` to the exact comma-separated production frontend origins, `TRUST_PROXY_HOPS` to the number of trusted reverse proxies in front of Express, and size `DB_POOL_MAX` for the hosting plan and number of API instances.
 - Set `NODE_ENV=production`, a production `DATABASE_URL`, `JWT_SECRET` and `CLIENT_URL` in the API host. The server binds to `0.0.0.0` in production and uses the platform `PORT`; local development binds to `127.0.0.1`. `DATABASE_MODE=memory` is deliberately disabled in production.
